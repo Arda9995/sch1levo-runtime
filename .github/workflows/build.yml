@@ -37,6 +37,7 @@ jobs:
         run: |
           OUT=box64-out; mkdir -p $OUT/lib $OUT/x64lib
           cp build/box64 $OUT/box64
+          strip --strip-debug $OUT/box64
           INTERP="$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1"
           patchelf --set-interpreter "$INTERP" --set-rpath '$ORIGIN/../glibc/lib' $OUT/box64
           patchelf --print-interpreter $OUT/box64
