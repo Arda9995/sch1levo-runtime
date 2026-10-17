@@ -1,0 +1,82 @@
+#!/system/bin/sh
+# sch1levo runtime entry point (MIT). Implements docs/RUNTIME_CONTRACT.md of the sch1levo app.
+# Layout (relative to the runtime root, the parent of this bin/ directory):
+#   bin/box64                 ARM64 glibc build; its ELF interpreter points at glibc/lib/ld-linux-aarch64.so.1
+#   glibc/lib/                ARM64 glibc + libgcc/libstdc++ used by box64
+#   wine/                     Wine (x86-64 Linux build, WoW64) run by box64
+#   share/sch1levo/           hello.exe, d3d11probe.exe, steamwebhelper.exe wrapper, VERSION
+# The app provides SCH1LEVO_DATA and SCH1LEVO_PREFIX. Output is plain text; nothing secret is printed.
+
+RT="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="$(cat "$RT/share/sch1levo/VERSION" 2>/dev/null)"
+DATA="${SCH1LEVO_DATA:?SCH1LEVO_DATA not set}"
+export WINEPREFIX="${SCH1LEVO_PREFIX:?SCH1LEVO_PREFIX not set}"
+export HOME="$DATA/home"
+export TMPDIR="$DATA/tmp"
+mkdir -p "$HOME" "$TMPDIR" "$WINEPREFIX" 2>/dev/null
+
+# Box64: where the x86-64 Wine libraries live, and its own diagnostics level.
+export BOX64_LD_LIBRARY_PATH="$RT/wine/lib/wine/x86_64-unix:$RT/wine/lib:$RT/box64-x64lib"
+export BOX64_PATH="$RT/wine/bin"
+export BOX64_LOG="${SCH1LEVO_BOX64_LOG:-1}"
+export BOX64_NOBANNER=0
+# glibc on Android: restartable sequences can be blocked by the app seccomp filter.
+export GLIBC_TUNABLES="glibc.pthread.rseq=0"
+export WINEDEBUG="${SCH1LEVO_WINEDEBUG:--all}"
+export WINEDLLOVERRIDES="winemenubuilder.exe=d;gameoverlayrenderer,gameoverlayrenderer64=d;bcrypt,ncrypt=b"
+export LANG=C.UTF-8
+
+BOX64="$RT/bin/box64"
+WINE="$RT/wine/bin/wine"
+STEAM_EXE='C:\Program Files (x86)\Steam\steam.exe'
+
+wine_run() {
+    "$BOX64" "$WINE" "$@"
+}
+
+need_display() {
+    echo "NOT_AVAILABLE: '$1' needs the display bridge, which is not part of runtime $VERSION yet."
+    echo "This runtime round checks that Box64 + Wine run on this tablet without a screen."
+    exit 2
+}
+
+cmd="$1"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    version)
+        echo "sch1levo-runtime $VERSION"
+        "$BOX64" --version 2>&1 | head -n 1
+        wine_run --version 2>&1 | tail -n 1
+        ;;
+    prefix-init)
+        echo "== box64"; "$BOX64" --version 2>&1 | head -n 3 || exit 10
+        echo "== wine --version"; wine_run --version 2>&1 | tail -n 5 || exit 11
+        echo "== wineboot -u"
+        wine_run wineboot -u 2>&1 | tail -n 40
+        "$BOX64" "$RT/wine/bin/wineserver" -w 2>&1 | tail -n 5
+        [ -f "$WINEPREFIX/system.reg" ] || { echo "PREFIX_FAIL: system.reg missing"; exit 12; }
+        echo "== Windows 10"
+        wine_run reg add 'HKCU\Software\Wine' /v Version /t REG_SZ /d win10 /f 2>&1 | tail -n 3
+        echo "== x86-64 console program"
+        wine_run "$RT/share/sch1levo/hello.exe" 2>&1 | tail -n 5
+        "$BOX64" "$RT/wine/bin/wineserver" -w 2>&1 | tail -n 3
+        echo "PREFIX_OK"
+        ;;
+    d3d11-probe)
+        need_display d3d11-probe
+        ;;
+    steam-install|steam-start|game-launch)
+        need_display "$cmd"
+        ;;
+    steam-shutdown)
+        wine_run "$STEAM_EXE" -shutdown >/dev/null 2>&1
+        sleep 5
+        "$BOX64" "$RT/wine/bin/wineserver" -k 2>&1 | tail -n 3
+        echo "STEAM_STOPPED"
+        ;;
+    *)
+        echo "usage: sch1levo-runtime version|prefix-init|d3d11-probe|steam-install <exe>|steam-start [args]|steam-shutdown|game-launch <appid>"
+        exit 64
+        ;;
+esac

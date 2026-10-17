@@ -1,0 +1,119 @@
+name: build-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_version:
+        description: "Runtime version (also the install folder name on the tablet)"
+        required: true
+        default: "r1-wine11.0-box64-0.4.4"
+      publish:
+        description: "Publish a GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  BOX64_TAG: v0.4.4
+  WINE_VERSION: "11.0"
+  WINE_URL: https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz
+  WINE_SHA256: c07a6857933c1fc60dff5448d79f39c92481c1e9db5aa628db9d0358446e0701
+  APP_FILES: /data/data/app.sch1levo/files/sch1levo
+
+jobs:
+  box64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Box64 (generic ARM64, glibc)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq cmake ninja-build patchelf
+          git clone --depth 1 --branch "$BOX64_TAG" https://github.com/ptitSeb/box64 src-box64
+          cmake -S src-box64 -B build -G Ninja -D ARM_DYNAREC=ON -D BAD_SIGNAL=ON -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          ninja -C build box64
+      - name: Collect box64 + glibc, point the interpreter at the app's install folder
+        run: |
+          OUT=box64-out; mkdir -p $OUT/lib $OUT/x64lib
+          cp build/box64 $OUT/box64
+          INTERP="$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1"
+          patchelf --set-interpreter "$INTERP" --set-rpath '$ORIGIN/../glibc/lib' $OUT/box64
+          patchelf --print-interpreter $OUT/box64
+          for l in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
+                   libresolv.so.2 libutil.so.1 libgcc_s.so.1 libstdc++.so.6; do
+            cp -L "/lib/aarch64-linux-gnu/$l" $OUT/lib/ || cp -L "/usr/lib/aarch64-linux-gnu/$l" $OUT/lib/
+          done
+          [ -d src-box64/x64lib ] && cp -RL src-box64/x64lib/. $OUT/x64lib/ || true
+          cp src-box64/LICENSE $OUT/LICENSE
+          dpkg -s libc6 | grep -E '^(Package|Version|Source)' > $OUT/GLIBC-SOURCE.txt
+          echo "glibc source: apt-get source glibc=$(dpkg-query -W -f='${Version}' libc6) (Ubuntu 24.04 arm64)" >> $OUT/GLIBC-SOURCE.txt
+          { echo "box64 $BOX64_TAG $(git -C src-box64 rev-parse HEAD)"; echo "wine $WINE_VERSION"; } > $OUT/VERSIONS.txt
+          ldd build/box64
+          ./build/box64 --version
+      - uses: actions/upload-artifact@v4
+        with: { name: box64, path: box64-out }
+
+  wine:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc g++ flex bison make gcc-mingw-w64 g++-mingw-w64 xz-utils
+      - name: Fetch and verify Wine source
+        run: |
+          curl -fsSL -o wine.tar.xz "$WINE_URL"
+          echo "$WINE_SHA256  wine.tar.xz" | sha256sum -c -
+          tar -xJf wine.tar.xz
+          ./patches/apply-wine-patches.sh "wine-$WINE_VERSION"
+      - name: Configure (x86-64 Linux, WoW64 PE, headless for round 1)
+        run: |
+          mkdir build && cd build
+          CFLAGS="-O2 -DSCH1LEVO_NO_TMP" ../wine-$WINE_VERSION/configure --prefix=/wine \
+            --enable-archs=i386,x86_64 --disable-tests \
+            --without-x --without-wayland --without-freetype --without-gstreamer --without-alsa --without-pulse \
+            --without-oss --without-dbus --without-cups --without-sane --without-krb5 --without-gphoto \
+            --without-v4l2 --without-pcap --without-usb --without-netapi --without-opencl --without-udev \
+            --without-unwind --without-ffmpeg --without-capi --without-pcsclite --without-gssapi --without-sdl
+      - name: Build
+        run: make -C build -j"$(nproc)"
+      - name: Install
+        run: |
+          make -C build install DESTDIR="$PWD/wine-out" >/dev/null
+          cp wine-$WINE_VERSION/COPYING.LIB wine-out/COPYING.LIB
+          du -sh wine-out/wine
+      - name: Build Windows test programs and the Steam wrapper
+        run: |
+          mkdir -p pe-out
+          x86_64-w64-mingw32-gcc -O2 -s -o pe-out/hello.exe src/hello.c
+          x86_64-w64-mingw32-gcc -O2 -s -o pe-out/d3d11probe.exe src/d3d11probe.c -ld3d11 -ldxgi -luuid
+          x86_64-w64-mingw32-gcc -O2 -s -municode -mwindows -o pe-out/steamwebhelper.exe src/steamwebhelper_wrapper.c
+      - uses: actions/upload-artifact@v4
+        with: { name: wine, path: wine-out }
+      - uses: actions/upload-artifact@v4
+        with: { name: pe, path: pe-out }
+
+  package:
+    needs: [box64, wine]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: Package runtime zip
+        run: |
+          chmod +x art/box64/box64
+          ./scripts/package.sh "${{ inputs.runtime_version }}" art/box64 art/wine art/pe dist
+      - uses: actions/upload-artifact@v4
+        with: { name: runtime, path: dist }
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          TAG="runtime-${{ inputs.runtime_version }}"
+          gh release create "$TAG" dist/*.zip dist/*.sha256 dist/manifest-snippet.properties \
+            --title "sch1levo runtime ${{ inputs.runtime_version }}" \
+            --notes "Built by workflow run ${{ github.run_id }} from ${{ github.sha }}. Round 1: Box64 + Wine without a display bridge (version, prefix-init only)."
