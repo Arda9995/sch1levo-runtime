@@ -6,6 +6,7 @@
 #   pe-dir:    hello.exe, d3d11probe.exe, steamwebhelper.exe
 set -euo pipefail
 VERSION="$1"; BOX="$2"; WINE="$3"; PE="$4"; OUT="$5"
+mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$(mktemp -d)/rt"
 mkdir -p "$STAGE/bin" "$STAGE/glibc/lib" "$STAGE/box64-x64lib" "$STAGE/share/sch1levo" "$STAGE/LICENSES" "$OUT"
