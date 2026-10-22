@@ -6,7 +6,7 @@ on:
       runtime_version:
         description: "Runtime version (also the install folder name on the tablet)"
         required: true
-        default: "r2-wine11.0-box64-0.4.4"
+        default: "r3-wine11.0-box64-0.4.4"
       publish:
         description: "Publish a GitHub Release"
         type: boolean
@@ -36,7 +36,10 @@ jobs:
           # DT_RPATH (--disable-new-dtags) also covers libraries glibc dlopens itself, such as libgcc_s for
           # pthread_exit. A response file keeps $ORIGIN away from shell and ninja expansion.
           INTERP="$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1"
-          printf '%s\n' "-Wl,--dynamic-linker=$INTERP" '-Wl,-rpath,$ORIGIN/../glibc/lib' '-Wl,--disable-new-dtags' > box64-link.rsp
+          # Android's app sandbox answers some glibc system calls with SIGSYS; the shim (linked in) handles them.
+          gcc -O2 -Wall -Werror -c -o android_seccomp_shim.o src/android_seccomp_shim.c
+          printf '%s\n' "-Wl,--dynamic-linker=$INTERP" '-Wl,-rpath,$ORIGIN/../glibc/lib' '-Wl,--disable-new-dtags' \
+            "$PWD/android_seccomp_shim.o" > box64-link.rsp
           cmake -S src-box64 -B build -G Ninja -D ARM_DYNAREC=ON -D BAD_SIGNAL=ON -D CMAKE_BUILD_TYPE=RelWithDebInfo \
             -D CMAKE_EXE_LINKER_FLAGS="@$PWD/box64-link.rsp"
           ninja -C build box64
@@ -52,6 +55,9 @@ jobs:
                    libresolv.so.2 libutil.so.1 libgcc_s.so.1 libstdc++.so.6; do
             cp -L "/lib/aarch64-linux-gnu/$l" $OUT/lib/ || cp -L "/usr/lib/aarch64-linux-gnu/$l" $OUT/lib/
           done
+          # The loader's own set_robust_list call runs before the shim exists; Android kills the process for it.
+          python3 scripts/patch-ldso.py $OUT/lib/ld-linux-aarch64.so.1
+          nm --defined-only $OUT/box64 | grep -q ' install_sigsys_handler$' || { echo "seccomp shim not linked into box64"; exit 1; }
           [ -d src-box64/x64lib ] && cp -RL src-box64/x64lib/. $OUT/x64lib/ || true
           cp src-box64/LICENSE $OUT/LICENSE
           dpkg -s libc6 | grep -E '^(Package|Version|Source)' > $OUT/GLIBC-SOURCE.txt
@@ -136,13 +142,17 @@ jobs:
           echo "RT=$RT" >> "$GITHUB_ENV"
       - name: version
         run: SCH1LEVO_DATA=/data/t SCH1LEVO_PREFIX=/data/t/prefix "$RT/bin/sch1levo-runtime" version
-      - name: prefix-init
+      - name: Build the Android sandbox simulator
+        run: gcc -O2 -Wall -Werror -o seccomp_sim src/seccomp_sim.c
+      - name: prefix-init inside the simulated Android sandbox
         run: |
           SCH1LEVO_BOX64_LOG=0 SCH1LEVO_DATA=/data/t SCH1LEVO_PREFIX=/data/t/prefix \
-            timeout 1200 "$RT/bin/sch1levo-runtime" prefix-init 2>&1 | tee prefix.log
+            timeout 1200 ./seccomp_sim /system/bin/sh "$RT/bin/sch1levo-runtime" prefix-init 2>&1 | tee prefix.log
           grep -q '^PREFIX_OK' prefix.log
           grep -q 'HELLO_OK' prefix.log
           ! grep -q 'libgcc_s.so.1 must be installed' prefix.log
+          ! grep -q 'Bad system call' prefix.log
+          ! grep -q 'sandbox blocked syscall' prefix.log
       - name: Publish release
         if: ${{ inputs.publish }}
         env: { GH_TOKEN: "${{ github.token }}" }

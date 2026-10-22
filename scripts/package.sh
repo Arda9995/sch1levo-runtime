@@ -26,6 +26,8 @@ cp "$HERE/LICENSE" "$STAGE/LICENSES/sch1levo-MIT.txt"
 cp "$BOX/LICENSE" "$STAGE/LICENSES/box64-MIT.txt"
 cp "$WINE/COPYING.LIB" "$STAGE/LICENSES/wine-LGPL-2.1.txt"
 cp "$HERE/patches/apply-wine-patches.sh" "$STAGE/LICENSES/wine-patch.sh"
+cp "$HERE/scripts/patch-ldso.py" "$STAGE/LICENSES/patch-ldso.py"
+cp "$HERE/src/android_seccomp_shim.c" "$STAGE/LICENSES/android_seccomp_shim.c"
 cp "$BOX/GLIBC-SOURCE.txt" "$STAGE/LICENSES/glibc-source.txt"
 cat > "$STAGE/LICENSES/README.txt" <<TXT
 sch1levo runtime $VERSION
@@ -35,6 +37,9 @@ sch1levo runtime $VERSION
   (Android-style wineserver socket directory). Build recipe: .github/workflows/build.yml of
   https://github.com/Arda9995/sch1levo-runtime
 - GNU C Library and GCC runtime libraries (LGPL / GPL with runtime exception) from Ubuntu arm64 packages; see glibc-source.txt.
+  Only change: bin/ld-linux-aarch64.so.1 has its set_robust_list system call replaced by a no-op (patch-ldso.py),
+  because Android's app sandbox kills processes that make it.
+- android_seccomp_shim.c (MIT), linked into box64: handles the other system calls Android's sandbox rejects.
 - sch1levo scripts, hello.exe, d3d11probe.exe, steamwebhelper wrapper: MIT.
 TXT
 cp "$BOX/VERSIONS.txt" "$STAGE/LICENSES/VERSIONS.txt"
