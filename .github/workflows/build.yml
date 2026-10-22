@@ -6,7 +6,7 @@ on:
       runtime_version:
         description: "Runtime version (also the install folder name on the tablet)"
         required: true
-        default: "r3-wine11.0-box64-0.4.4"
+        default: "r4-wine11.0-box64-0.4.4"
       publish:
         description: "Publish a GitHub Release"
         type: boolean
@@ -55,8 +55,10 @@ jobs:
                    libresolv.so.2 libutil.so.1 libgcc_s.so.1 libstdc++.so.6; do
             cp -L "/lib/aarch64-linux-gnu/$l" $OUT/lib/ || cp -L "/usr/lib/aarch64-linux-gnu/$l" $OUT/lib/
           done
-          # The loader's own set_robust_list call runs before the shim exists; Android kills the process for it.
-          python3 scripts/patch-ldso.py $OUT/lib/ld-linux-aarch64.so.1
+          # Calls Android's sandbox rejects while signals are blocked (or before the shim exists) cannot be caught;
+          # take them out of glibc: set_robust_list (99) in the loader and thread start, faccessat2 (439).
+          python3 scripts/patch-glibc.py $OUT/lib/ld-linux-aarch64.so.1 99:1
+          python3 scripts/patch-glibc.py $OUT/lib/libc.so.6 99:2 439:1
           nm --defined-only $OUT/box64 | grep -q ' install_sigsys_handler$' || { echo "seccomp shim not linked into box64"; exit 1; }
           [ -d src-box64/x64lib ] && cp -RL src-box64/x64lib/. $OUT/x64lib/ || true
           cp src-box64/LICENSE $OUT/LICENSE
@@ -142,12 +144,20 @@ jobs:
           echo "RT=$RT" >> "$GITHUB_ENV"
       - name: version
         run: SCH1LEVO_DATA=/data/t SCH1LEVO_PREFIX=/data/t/prefix "$RT/bin/sch1levo-runtime" version
-      - name: Build the Android sandbox simulator
-        run: gcc -O2 -Wall -Werror -o seccomp_sim src/seccomp_sim.c
+      - name: Put box64 inside a simulated Android sandbox
+        # On the tablet the shell is Android's own (bionic) and only box64 and its children are glibc programs,
+        # so only they get the filter here: bin/box64 becomes a wrapper that installs it and runs the real box64.
+        run: |
+          gcc -O2 -Wall -Werror -o seccomp_sim src/seccomp_sim.c
+          mv "$RT/bin/box64" "$RT/bin/box64.real"
+          printf '#!/bin/sh\nexec %s %s "$@"\n' "$PWD/seccomp_sim" "$RT/bin/box64.real" > "$RT/bin/box64"
+          chmod +x "$RT/bin/box64"
+          # The filter must really kill glibc programs, or this test proves nothing.
+          ! ./seccomp_sim /bin/true
       - name: prefix-init inside the simulated Android sandbox
         run: |
           SCH1LEVO_BOX64_LOG=0 SCH1LEVO_DATA=/data/t SCH1LEVO_PREFIX=/data/t/prefix \
-            timeout 1200 ./seccomp_sim /system/bin/sh "$RT/bin/sch1levo-runtime" prefix-init 2>&1 | tee prefix.log
+            timeout 1200 "$RT/bin/sch1levo-runtime" prefix-init 2>&1 | tee prefix.log
           grep -q '^PREFIX_OK' prefix.log
           grep -q 'HELLO_OK' prefix.log
           ! grep -q 'libgcc_s.so.1 must be installed' prefix.log

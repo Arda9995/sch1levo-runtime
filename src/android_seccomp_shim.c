@@ -1,6 +1,6 @@
 // Linked into box64. Android's app sandbox (seccomp) rejects some system calls that glibc on ARM64 makes,
 // by sending SIGSYS, which kills the process ("Bad system call"). Seen on Android 16 (app sandbox):
-//   99  set_robust_list  glibc thread setup      -> answer ENOSYS (glibc copes; the loader's own call is patched out)
+//   99  set_robust_list  glibc thread setup      -> answer ENOSYS (glibc's own calls are patched out: patch-glibc.py)
 //   202 accept           wineserver's main loop  -> run accept4(fd, addr, len, 0) instead (Android allows accept4)
 //   439 faccessat2       file permission checks  -> answer ENOSYS (glibc falls back to faccessat)
 // Any other blocked call is answered with ENOSYS and named once on stderr, so it shows in the app's diagnostics
