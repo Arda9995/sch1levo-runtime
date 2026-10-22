@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # sch1levo runtime entry point (MIT). Implements docs/RUNTIME_CONTRACT.md of the sch1levo app.
 # Layout (relative to the runtime root, the parent of this bin/ directory):
-#   bin/box64                 ARM64 glibc build; its ELF interpreter points at glibc/lib/ld-linux-aarch64.so.1
+#   bin/box64                 ARM64 glibc build; linked with bin/ld-linux-aarch64.so.1 as its ELF interpreter
 #   glibc/lib/                ARM64 glibc + libgcc/libstdc++ used by box64
 #   wine/                     Wine (x86-64 Linux build, WoW64) run by box64
 #   share/sch1levo/           hello.exe, d3d11probe.exe, steamwebhelper.exe wrapper, VERSION
@@ -14,6 +14,12 @@ export WINEPREFIX="${SCH1LEVO_PREFIX:?SCH1LEVO_PREFIX not set}"
 export HOME="$DATA/home"
 export TMPDIR="$DATA/tmp"
 mkdir -p "$HOME" "$TMPDIR" "$WINEPREFIX" 2>/dev/null
+
+# The app's unzip only marks files under bin/ folders executable. Wine also starts its own loader and
+# preloader from lib/wine/x86_64-unix/, so mark those (everything there except libraries) too.
+for f in "$RT"/wine/lib/wine/x86_64-unix/*; do
+    case "$f" in *.so|*.a) ;; *) [ -x "$f" ] || chmod u+x "$f" 2>/dev/null ;; esac
+done
 
 # Box64: where the x86-64 Wine libraries live, and its own diagnostics level.
 export BOX64_LD_LIBRARY_PATH="$RT/wine/lib/wine/x86_64-unix:$RT/wine/lib:$RT/box64-x64lib"

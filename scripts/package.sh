@@ -1,7 +1,7 @@
 #!/bin/bash
 # Assembles the runtime zip from the CI build outputs.
 # Usage: scripts/package.sh <version> <box64-dir> <wine-dir> <pe-dir> <out-dir>
-#   box64-dir: box64 (patched interpreter + rpath), glibc libs in lib/, x64lib/
+#   box64-dir: box64 (linked with the app's interpreter + rpath), glibc libs in lib/, x64lib/
 #   wine-dir:  `make install DESTDIR` root of the x86-64 Wine build (prefix /wine)
 #   pe-dir:    hello.exe, d3d11probe.exe, steamwebhelper.exe
 set -euo pipefail
@@ -29,7 +29,8 @@ cp "$HERE/patches/apply-wine-patches.sh" "$STAGE/LICENSES/wine-patch.sh"
 cp "$BOX/GLIBC-SOURCE.txt" "$STAGE/LICENSES/glibc-source.txt"
 cat > "$STAGE/LICENSES/README.txt" <<TXT
 sch1levo runtime $VERSION
-- Box64 (MIT): https://github.com/ptitSeb/box64 (tag in VERSIONS.txt), unmodified; ELF interpreter/RUNPATH set with patchelf.
+- Box64 (MIT): https://github.com/ptitSeb/box64 (tag in VERSIONS.txt), unmodified source; linked with the app's
+  ELF interpreter path and RPATH (linker flags in .github/workflows/build.yml).
 - Wine (LGPL-2.1-or-later): https://dl.winehq.org/wine/source/ (version in VERSIONS.txt). Only change: wine-patch.sh
   (Android-style wineserver socket directory). Build recipe: .github/workflows/build.yml of
   https://github.com/Arda9995/sch1levo-runtime

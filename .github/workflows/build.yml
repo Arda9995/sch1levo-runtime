@@ -6,7 +6,7 @@ on:
       runtime_version:
         description: "Runtime version (also the install folder name on the tablet)"
         required: true
-        default: "r1-wine11.0-box64-0.4.4"
+        default: "r2-wine11.0-box64-0.4.4"
       publish:
         description: "Publish a GitHub Release"
         type: boolean
@@ -27,20 +27,27 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Build Box64 (generic ARM64, glibc)
+      - name: Build Box64 (generic ARM64, glibc), linked for the app's install folder
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq cmake ninja-build patchelf
+          sudo apt-get update -qq && sudo apt-get install -y -qq cmake ninja-build
           git clone --depth 1 --branch "$BOX64_TAG" https://github.com/ptitSeb/box64 src-box64
-          cmake -S src-box64 -B build -G Ninja -D ARM_DYNAREC=ON -D BAD_SIGNAL=ON -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          # The interpreter and library path are set by the linker, not patched in afterwards: r1 used patchelf,
+          # which made two LOAD segments overlap so .dynamic landed on a read-only page and box64 crashed at start.
+          # DT_RPATH (--disable-new-dtags) also covers libraries glibc dlopens itself, such as libgcc_s for
+          # pthread_exit. A response file keeps $ORIGIN away from shell and ninja expansion.
+          INTERP="$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1"
+          printf '%s\n' "-Wl,--dynamic-linker=$INTERP" '-Wl,-rpath,$ORIGIN/../glibc/lib' '-Wl,--disable-new-dtags' > box64-link.rsp
+          cmake -S src-box64 -B build -G Ninja -D ARM_DYNAREC=ON -D BAD_SIGNAL=ON -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+            -D CMAKE_EXE_LINKER_FLAGS="@$PWD/box64-link.rsp"
           ninja -C build box64
-      - name: Collect box64 + glibc, point the interpreter at the app's install folder
+      - name: Check the box64 ELF layout
+        run: python3 scripts/check-elf.py build/box64 "$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1" '$ORIGIN/../glibc/lib'
+      - name: Collect box64 + glibc
         run: |
           OUT=box64-out; mkdir -p $OUT/lib $OUT/x64lib
           cp build/box64 $OUT/box64
           strip --strip-debug $OUT/box64
-          INTERP="$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1"
-          patchelf --set-interpreter "$INTERP" --set-rpath '$ORIGIN/../glibc/lib' $OUT/box64
-          patchelf --print-interpreter $OUT/box64
+          python3 scripts/check-elf.py $OUT/box64 "$APP_FILES/runtime/${{ inputs.runtime_version }}/bin/ld-linux-aarch64.so.1" '$ORIGIN/../glibc/lib'
           for l in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
                    libresolv.so.2 libutil.so.1 libgcc_s.so.1 libstdc++.so.6; do
             cp -L "/lib/aarch64-linux-gnu/$l" $OUT/lib/ || cp -L "/usr/lib/aarch64-linux-gnu/$l" $OUT/lib/
@@ -50,8 +57,6 @@ jobs:
           dpkg -s libc6 | grep -E '^(Package|Version|Source)' > $OUT/GLIBC-SOURCE.txt
           echo "glibc source: apt-get source glibc=$(dpkg-query -W -f='${Version}' libc6) (Ubuntu 24.04 arm64)" >> $OUT/GLIBC-SOURCE.txt
           { echo "box64 $BOX64_TAG $(git -C src-box64 rev-parse HEAD)"; echo "wine $WINE_VERSION"; } > $OUT/VERSIONS.txt
-          ldd build/box64
-          ./build/box64 --version
       - uses: actions/upload-artifact@v4
         with: { name: box64, path: box64-out }
 
@@ -110,6 +115,34 @@ jobs:
           ./scripts/package.sh "${{ inputs.runtime_version }}" art/box64 art/wine art/pe dist
       - uses: actions/upload-artifact@v4
         with: { name: runtime, path: dist }
+
+  # Installs the zip exactly where the app puts it and runs the app's Windows-environment step on ARM64.
+  # Nothing is published unless this passes.
+  test:
+    needs: [package]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: runtime, path: dist }
+      - name: Install like the app does
+        run: |
+          RT="$APP_FILES/runtime/${{ inputs.runtime_version }}"
+          sudo mkdir -p "$RT" && sudo chown -R "$(id -u):$(id -g)" /data
+          unzip -q dist/*.zip -d "$RT"
+          # The app's unzip keeps no permissions; it marks every file under a bin/ folder executable.
+          find "$RT" -type f -path '*/bin/*' -exec chmod u+x {} +
+          [ -e /system/bin/sh ] || { sudo mkdir -p /system/bin && sudo ln -s /bin/sh /system/bin/sh; }
+          echo "RT=$RT" >> "$GITHUB_ENV"
+      - name: version
+        run: SCH1LEVO_DATA=/data/t SCH1LEVO_PREFIX=/data/t/prefix "$RT/bin/sch1levo-runtime" version
+      - name: prefix-init
+        run: |
+          SCH1LEVO_BOX64_LOG=0 SCH1LEVO_DATA=/data/t SCH1LEVO_PREFIX=/data/t/prefix \
+            timeout 1200 "$RT/bin/sch1levo-runtime" prefix-init 2>&1 | tee prefix.log
+          grep -q '^PREFIX_OK' prefix.log
+          grep -q 'HELLO_OK' prefix.log
+          ! grep -q 'libgcc_s.so.1 must be installed' prefix.log
       - name: Publish release
         if: ${{ inputs.publish }}
         env: { GH_TOKEN: "${{ github.token }}" }
@@ -117,4 +150,4 @@ jobs:
           TAG="runtime-${{ inputs.runtime_version }}"
           gh release create "$TAG" dist/*.zip dist/*.sha256 dist/manifest-snippet.properties \
             --title "sch1levo runtime ${{ inputs.runtime_version }}" \
-            --notes "Built by workflow run ${{ github.run_id }} from ${{ github.sha }}. Round 1: Box64 + Wine without a display bridge (version, prefix-init only)."
+            --notes "Built by workflow run ${{ github.run_id }} from ${{ github.sha }}. Box64 + Wine without a display bridge (version, prefix-init only). Passed prefix-init on ARM64 at the app's install path."
